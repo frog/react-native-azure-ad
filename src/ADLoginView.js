@@ -13,7 +13,6 @@ export default class ADLoginView extends React.Component {
 
   props : {
     onSuccess? : ?Function,
-    renderError? : ?Function,
     needLogout? : bool,
     style : any,
     onURLChange : Function,
@@ -30,7 +29,6 @@ export default class ADLoginView extends React.Component {
     authority_host : loginUrl,
     tenant : 'common',
     onSuccess : () => {},
-    renderError: () => {},
     onPageRequest : null
   };
 
@@ -38,6 +36,7 @@ export default class ADLoginView extends React.Component {
   _onTokenGranted : ()=>{};
   _lock : bool;
   _accessToken : Object;
+  _resourceForWhichAccessTokenIsFetchedByGet: string;
 
   constructor(props:any){
     super(props)
@@ -80,7 +79,7 @@ export default class ADLoginView extends React.Component {
   render() {
     // Fix visibility problem on Android webview
     let js = `document.getElementsByTagName('body')[0].style.height = '${Dimensions.get('window').height}px';`
-    let renderError = this.props.renderError || function () { }
+
     return (
         this.state.visible ? (<WebView
           ref="ADLoginView"
@@ -107,7 +106,6 @@ export default class ADLoginView extends React.Component {
           onShouldStartLoadWithRequest={(e) => {
             return true
           }}
-          renderError={() => renderError(this.refs.ADLoginView.reload)}
           startInLoadingState={false}
           injectedJavaScript={js}
           scalesPageToFit={true}/>) : null
@@ -126,14 +124,12 @@ export default class ADLoginView extends React.Component {
     let context = this.props.context || null
     let redirect = context.getConfig().redirect_uri
     let prompt = context.getConfig().prompt
-    let login_hint = context.getConfig().login_hint
 
     if(context !== null) {
       let result = `${authUrl}?response_type=code` +
              `&client_id=${context.getConfig().client_id}` +
              (redirect ? `&redirect_url=${context.getConfig().redirect_uri}&nonce=rnad-${Date.now()}` : '') +
-             (prompt ? `&prompt=${context.getConfig().prompt}` : '') +
-             (login_hint ? `&login_hint=${context.getConfig().login_hint}` : '')
+             (prompt ? `&prompt=${context.getConfig().prompt}` : '')
              
       if(this._needRedirect)
         result = `https://login.windows.net/${this.props.context.getConfig().client_id}/oauth2/logout`
@@ -142,6 +138,14 @@ export default class ADLoginView extends React.Component {
     else {
       throw new Error('AD context should not be null/undefined.')
     }
+  }
+
+  _getAcquireTokenPopupUrl(tenant: string, resource: string, response_type: string): string {
+    let context = this.props.context
+    let redirect = context.getConfig().redirect_uri
+    return `https://login.microsoftonline.com/${tenant}/oauth2/authorize?response_type=${response_type}&resource=${resource}` +
+      `&client_id=${context.getConfig().client_id}` +
+      `&scope=openid&nonce=rnad-${Date.now()}`
   }
 
   /**
@@ -153,17 +157,28 @@ export default class ADLoginView extends React.Component {
     log.verbose('ADLoginView navigate to', e.url)
     if(this._lock)
       return true
-    let code = /((\?|\&)code\=)[^\&]+/.exec(e.url)
+    let code = /((\?|\&)code\=)[^\&]+/.exec(e.url) 
 
     if(this._needRedirect) {
       // this._needRedirect = false
       return true
     }
 
-    if(this.props.onURLChange)
+    if(this.props.onURLChange) {
       this.props.onURLChange(e)
+    }
 
-    if( code !== null ){
+    if (e.url.indexOf("access_token") > -1) {
+      this.setState({visible : true})
+      this.props.onVisibilityChange && this.props.onVisibilityChange(false)
+
+      // Once access_token is fetched, go back to login, this time auth will go fine.
+      this.setState({page: this._getLoginUrl(this.props.context.getConfig().tenant)});
+
+      return true;
+    }
+    
+    if( code !== null){
       this._lock = true
       log.verbose('ADLoginView._handleADToken code=', code[0])
       code = String(code[0]).replace(/(\?|\&)?code\=/,'')
@@ -247,9 +262,16 @@ export default class ADLoginView extends React.Component {
       if(context !== null && typeof this.props.onSuccess === 'function')
         onSuccess(context.getCredentials())
       this._lock = false
-
     }).catch((err) => {
+      this._resourceForWhichAccessTokenIsFetchedByGet = err.resource;
+      if (err.response.error.indexOf("interaction_required") > -1) {
+        this.setState({visible : true})
+        this._lock = false;
+        this.props.onVisibilityChange && this.props.onVisibilityChange(false)
+        this.setState({page: this._getAcquireTokenPopupUrl(context.getConfig().tenant, err.resource, "token")});
+      } else {
       throw new Error('Failed to acquire token for resources', err.stack)
+      }
     })
   }
 
